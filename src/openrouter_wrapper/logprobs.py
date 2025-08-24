@@ -10,7 +10,7 @@ import stamina
 import httpx
 from anycache import anycache
 
-from .retry import RetryException, retry_only_on_real_errors, ProviderError, UpstreamError, LogprobsNotSupportedError, MalformedResponseError
+from .retry import openrouter_request
 
 
 def get_top_logprobs_param(model_id, provider):
@@ -30,93 +30,39 @@ def get_top_logprobs_param(model_id, provider):
         return 5
     return 20
 
-@anycache(cachedir="../.anycache3")
-@stamina.retry(on=retry_only_on_real_errors, attempts=5, wait_max=20)
 def openrouter_completion_wlogprobs(messages, model_id, max_completion_tokens=2, provider_whitelist=None, provider_blocklist=None, **kwargs):
-    """"Run a completion with logprobs on OpenRouter."""
-    response = httpx.post(
-        url="https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model_id,
-            "messages": messages,
+    json={
+        "model": model_id,
+        "messages": messages,
 
-            # openai wants an int here
-            "logprobs": True,
+        # openai wants an int here
+        "logprobs": True,
 
-            # grok wants 8
-            "top_logprobs": get_top_logprobs_param(model_id, provider_whitelist[0] if provider_whitelist else None),
-            "max_completion_tokens": max_completion_tokens,
-            # "temperature": 0.0,
-            "stop": '</ans>',
-            "provider": {"require_parameters": True, 
-                         "only": provider_whitelist,
-                         'ignore': provider_blocklist
-                         },
-            "usage": {"include": True},
-            "reason": {"include": True, "effort": "low", 
-                       "max_tokens": 0
-                       },
+        # grok wants 8
+        "top_logprobs": get_top_logprobs_param(model_id, provider_whitelist[0] if provider_whitelist else None),
+        "max_completion_tokens": max_completion_tokens,
+        # "temperature": 0.0,
+        "stop": '</ans>',
+        "provider": {"require_parameters": True, 
+                        "only": provider_whitelist,
+                        'ignore': provider_blocklist
+                        },
+        "usage": {"include": True},
+        "reason": {"include": True, "effort": "low", 
+                    "max_tokens": 0
+                    },
 
-            # "logit_bias": {
-            #     " ": -100,
-            #     "\n": -100,
-            #     "": -100,
-            # },
-            **kwargs,
+        # "logit_bias": {
+        #     " ": -100,
+        #     "\n": -100,
+        #     "": -100,
+        # },
+        **kwargs,
 
-        },
-        timeout=60.0,
-    )
-    # https://openrouter.ai/docs/api-reference/errors#error-codes
-    # 403 is moderation
-    # 429 is request rate limit exceeded
-    try:
-        response.raise_for_status()
-    except requests.exceptions.HTTPError:
-        # requests.exceptions.HTTPError: 408 Client Error: Request Timeout for url: https://openrouter.ai/api/v1/chat/completions
-        logger.error(f"Error response: {response.text}")
-        raise
-    try:
-        data = response.json()
-        
-        if "error" in data:
-            raise ProviderError(data['error'], data=data)
+    }
+    return openrouter_request(json)
 
-        if "choices" not in data:
-            raise MalformedResponseError(f"{model_id} response missing 'choices' field", data=data)
-        
-        if not data['choices']:
-            raise MalformedResponseError(f"{model_id} returned empty choices", data=data)
 
-        if data['choices'][0]['finish_reason'] == 'error':
-            error = data['choices'][0]['error']['message']
-            
-            # open_router.logprobs.UpstreamError: Upstream error from Cerebras: Encountered a server error
-            if 'please try again' in str(error).lower():
-                # raise http 5?? error
-                raise RetryException("Server error, please try again later")
-            raise UpstreamError(error, data=data)
-
-        if not data['choices'][0].get('logprobs'):
-            raise LogprobsNotSupportedError(f"{model_id} has no logprobs capability", data=data)
-    except requests.exceptions.JSONDecodeError as e:
-        logger.error(f"Failed to decode JSON response for model {model_id}: {e}")
-        logger.debug(f"Response text: {response.text}")
-        raise MalformedResponseError(f"Malformed response for model {model_id}", data=response.text)
-    except OpenRouterError:
-        raise
-    except Exception as e:
-        # logger.error(f"request {response.request.body}")
-        logger.error(f"failed with {model_id},{e}")
-        logger.debug(response.text)
-        # logger.debug(response.headers)
-        raise e
-    
-    return data
 
 
 def get_logprobs(response, regex: Optional[str] = '\d'):
