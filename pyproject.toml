@@ -1,0 +1,24 @@
+[project]
+name = "openrouter-wrapper"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "wassname", email = "1103714+wassname@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+    "numpy>=2.2.6",
+    "polars>=1.32.3",
+    "python-dotenv>=1.1.1",
+    "stamina>=25.1.0",
+]
+
+[project.scripts]
+openrouter-wrapper = "openrouter_wrapper:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
