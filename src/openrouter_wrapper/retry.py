@@ -1,4 +1,3 @@
-
 from typing import Dict, Optional
 import httpx
 import stamina
@@ -51,30 +50,45 @@ class RetryException(Exception):
     pass
 
 def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
-    logger.info(f"is_retryable_error called with {exc}")
+    """
+    Determine if an error is retryable based on type, status code, and message patterns.
+    Logs all errors for debugging.
+    """
+    logger.info(f"Evaluating error for retry: {exc}")
+    
     if isinstance(exc, RetryException):
+        logger.warning(f"Retryable: Explicit RetryException - {exc}")
         return True
+    
     if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RequestError)):
-        logger.info(f"Retrying due to httpx network error: {exc}")
+        logger.warning(f"Retryable: Network/timeout error - {exc}")
         return True
-    # If the error is an HTTP status error, only retry on 5xx errors.
+    
     if isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
+        logger.error(f"HTTP error {status_code}: {exc.response.text}")
+        
         if status_code in RETRYABLE_STATUS_CODES:
             return True    
         
         # Check for specific retryable patterns in response (e.g., upstream rate limits)
-        if "rate-limited upstream" in response_text.lower() or "provider returned error" in response_text.lower():
-            logger.warning(f"Retryable: Upstream/provider pattern in response - {response_text}")
-            return True
+        retry_patterns = [
+            "rate-limited upstream",
+            "temporarily rate-limited upstream",
+            "provider returned error",
+            "please try again"
+        ]
+        for pattern in retry_patterns:
+            if pattern in response_text.lower():
+                logger.warning(f"Retryable: Pattern '{pattern}' in response - {response_text}")
+                return True
+        
+        logger.error(f"Non-retryable: Status {status_code} - {exc}. response_text:{response_text}")
         return False
-    # Otherwise retry on all httpx errors.
-    logger.warning(f"Got unexpected error e={exc}")
+    
+    # Log unexpected errors but don't retry by default
+    logger.error(f"Non-retryable: Unexpected error - {exc}")
     return False
-    # return isinstance(exc, httpx.HTTPError)
-
-    # httpcore.ReadTimeout: The read operation timed out
-    # httpx.HTTPStatusError: Server error '502 Bad Gateway' for url 'https://openrouter.ai/api/v1/chat/completions'
 
 
 @stamina.retry(on=is_retryable_error, attempts=5, wait_max=20)

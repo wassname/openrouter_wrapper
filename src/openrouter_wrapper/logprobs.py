@@ -30,7 +30,7 @@ def get_top_logprobs_param(model_id, provider):
         return 5
     return 20
 
-def openrouter_completion_wlogprobs(messages, model_id, max_completion_tokens=2, provider_whitelist=None, provider_blocklist=None, stop= '</ans>', **kwargs):
+def openrouter_completion_wlogprobs(messages, model_id, max_completion_tokens=2, provider_whitelist=None, provider_blocklist=None, stop= [], **kwargs):
     json={
         "model": model_id,
         "messages": messages,
