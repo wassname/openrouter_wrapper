@@ -1,9 +1,9 @@
+import os
 from typing import Dict, Optional
 import httpx
 import stamina
 from loguru import logger
 import requests
-from . import OPENROUTER_API_KEY
 
 stamina.instrumentation.set_on_retry_hooks([stamina.instrumentation.LoggingOnRetryHook])
 
@@ -69,6 +69,11 @@ def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
         logger.error(f"HTTP error {status_code}: {exc.response.text}")
         
         if status_code in RETRYABLE_STATUS_CODES:
+            # Special case for 429: don't retry on free-models-per-day limit
+            if status_code == 429 and "free-models-per-day" in response_text.lower():
+                logger.error(f"Non-retryable: Free models daily limit exceeded - {response_text}")
+                return False
+            logger.warning(f"Retryable: Status {status_code} - {exc}")
             return True    
         
         # Check for specific retryable patterns in response (e.g., upstream rate limits)
@@ -92,8 +97,10 @@ def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
 
 
 @stamina.retry(on=is_retryable_error, attempts=5, wait_max=20)
-def openrouter_request(payload):
+def openrouter_request(payload, timeout=60.0, OPENROUTER_API_KEY=None):
     """"Run a completion with logprobs on OpenRouter."""
+    if OPENROUTER_API_KEY is None:
+        OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     model_id = payload.get("model_id")
     response = httpx.post(
         url="https://openrouter.ai/api/v1/chat/completions",
@@ -102,7 +109,7 @@ def openrouter_request(payload):
             "Content-Type": "application/json",
         },
         json=payload,
-        timeout=60.0,
+        timeout=timeout,
     )
     # TODO go through this for ways to improve retry vs error raising https://old.reddit.com/r/JanitorAI_Official/comments/1m7r5ti/openrouter_error_guide_so_you_dont_have_to_scroll/
     # https://openrouter.ai/docs/api-reference/errors#error-codes
