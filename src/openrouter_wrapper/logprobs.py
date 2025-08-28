@@ -10,7 +10,7 @@ import stamina
 import httpx
 from anycache import anycache
 
-from .retry import openrouter_request
+from .retry import openrouter_request, LogprobsNotSupportedError
 
 
 def get_top_logprobs_param(model_id, provider):
@@ -30,26 +30,24 @@ def get_top_logprobs_param(model_id, provider):
         return 5
     return 20
 
-def openrouter_completion_wlogprobs(messages, model_id, max_completion_tokens=2, provider_whitelist=None, provider_blocklist=None, **kwargs):
+def openrouter_completion_wlogprobs(messages, model_id, max_completion_tokens=2, provider_whitelist=None, provider_blocklist=None, stop= '</ans>', **kwargs):
     json={
         "model": model_id,
         "messages": messages,
 
-        # openai wants an int here
-        "logprobs": True,
 
         # grok wants 8
         "top_logprobs": get_top_logprobs_param(model_id, provider_whitelist[0] if provider_whitelist else None),
         "max_completion_tokens": max_completion_tokens,
         # "temperature": 0.0,
-        "stop": '</ans>',
+        "stop": stop,
         "provider": {"require_parameters": True, 
                         "only": provider_whitelist,
                         'ignore': provider_blocklist
                         },
         "usage": {"include": True},
         "reason": {"include": True, "effort": "low", 
-                    "max_tokens": 0
+                    "max_tokens": 60
                     },
 
         # "logit_bias": {
@@ -60,7 +58,12 @@ def openrouter_completion_wlogprobs(messages, model_id, max_completion_tokens=2,
         **kwargs,
 
     }
-    return openrouter_request(json)
+    data = openrouter_request(json)
+
+    if not data['choices'][0].get('logprobs'):
+        raise LogprobsNotSupportedError(f"{model_id} has no logprobs capability", data=data)
+    return data
+    
 
 
 

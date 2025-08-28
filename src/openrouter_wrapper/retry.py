@@ -35,7 +35,7 @@ class UpstreamError(OpenRouterError):
     """An error occurred in the upstream model response"""
 
 
-status_forcelist=[
+RETRYABLE_STATUS_CODES=[
     # 403 # is moderation
     408,  # request timeout
     429, # request rate limit exceeded
@@ -50,8 +50,8 @@ class RetryException(Exception):
     """Exception raised for retryable errors."""
     pass
 
-def retry_only_on_real_errors(exc: Exception) -> bool:
-    logger.info(f"retry_only_on_real_errors called with {exc}")
+def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
+    logger.info(f"is_retryable_error called with {exc}")
     if isinstance(exc, RetryException):
         return True
     if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RequestError)):
@@ -59,7 +59,15 @@ def retry_only_on_real_errors(exc: Exception) -> bool:
         return True
     # If the error is an HTTP status error, only retry on 5xx errors.
     if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in status_forcelist
+        status_code = exc.response.status_code
+        if status_code in RETRYABLE_STATUS_CODES:
+            return True    
+        
+        # Check for specific retryable patterns in response (e.g., upstream rate limits)
+        if "rate-limited upstream" in response_text.lower() or "provider returned error" in response_text.lower():
+            logger.warning(f"Retryable: Upstream/provider pattern in response - {response_text}")
+            return True
+        return False
     # Otherwise retry on all httpx errors.
     logger.warning(f"Got unexpected error e={exc}")
     return False
@@ -69,7 +77,7 @@ def retry_only_on_real_errors(exc: Exception) -> bool:
     # httpx.HTTPStatusError: Server error '502 Bad Gateway' for url 'https://openrouter.ai/api/v1/chat/completions'
 
 
-@stamina.retry(on=retry_only_on_real_errors, attempts=5, wait_max=20)
+@stamina.retry(on=is_retryable_error, attempts=5, wait_max=20)
 def openrouter_request(payload):
     """"Run a completion with logprobs on OpenRouter."""
     model_id = payload.get("model_id")
@@ -82,20 +90,25 @@ def openrouter_request(payload):
         json=payload,
         timeout=60.0,
     )
+    # TODO go through this for ways to improve retry vs error raising https://old.reddit.com/r/JanitorAI_Official/comments/1m7r5ti/openrouter_error_guide_so_you_dont_have_to_scroll/
     # https://openrouter.ai/docs/api-reference/errors#error-codes
     # 403 is moderation
     # 429 is request rate limit exceeded
     try:
         response.raise_for_status()
-    except requests.exceptions.HTTPError:
+    except (requests.exceptions.HTTPError, httpx.HTTPStatusError) as e:
         # requests.exceptions.HTTPError: 408 Client Error: Request Timeout for url: https://openrouter.ai/api/v1/chat/completions
-        logger.error(f"Error response: {response.text}")
-        raise
+        logger.error(f"HTTP error for model {model_id}: {response.text}")
+        if not is_retryable_error(e, response.text):
+            raise  # Non-retryable, stop here
+        raise RetryException(f"Retryable HTTP error: {e}")  # Trigger retry
     try:
         data = response.json()
         
         if "error" in data:
-            raise ProviderError(data['error'], data=data)
+            error_msg = data['error'].get('message', str(data['error']))
+            logger.error(f"OpenRouter returned error: {error_msg}")
+            raise ProviderError(error_msg, data=data)
 
         if "choices" not in data:
             raise MalformedResponseError(f"{model_id} response missing 'choices' field", data=data)
@@ -103,17 +116,16 @@ def openrouter_request(payload):
         if not data['choices']:
             raise MalformedResponseError(f"{model_id} returned empty choices", data=data)
 
-        if data['choices'][0]['finish_reason'] == 'error':
-            error = data['choices'][0]['error']['message']
-            
-            # open_router.logprobs.UpstreamError: Upstream error from Cerebras: Encountered a server error
+        choice = data['choices'][0]
+        if choice['finish_reason'] == 'error':
+            error = choice['error']['message']
+            logger.error(f"Upstream error for model {model_id}: {error}")
+
+            # e.g. open_router.logprobs.UpstreamError: Upstream error from Cerebras: Encountered a server error
             if 'please try again' in str(error).lower():
-                # raise http 5?? error
-                raise RetryException("Server error, please try again later")
+                raise RetryException("Upstream server error, retrying")
             raise UpstreamError(error, data=data)
 
-        if not data['choices'][0].get('logprobs'):
-            raise LogprobsNotSupportedError(f"{model_id} has no logprobs capability", data=data)
     except requests.exceptions.JSONDecodeError as e:
         logger.error(f"Failed to decode JSON response for model {model_id}: {e}")
         logger.debug(f"Response text: {response.text}")
@@ -121,8 +133,7 @@ def openrouter_request(payload):
     except OpenRouterError:
         raise
     except Exception as e:
-        # logger.error(f"request {response.request.body}")
-        logger.error(f"failed with {model_id},{e}")
+        logger.error(f"Unexpected error for model {model_id}: {e}")
         logger.debug(response.text)
         # logger.debug(response.headers)
         raise e
