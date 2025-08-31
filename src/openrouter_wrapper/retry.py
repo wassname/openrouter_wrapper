@@ -10,7 +10,7 @@ stamina.instrumentation.set_on_retry_hooks([stamina.instrumentation.LoggingOnRet
 class OpenRouterError(Exception):
     """Base exception for OpenRouter API errors"""
     def __init__(self, message, data: Optional[Dict] = None):
-        super().__init__(message)
+        super().__init__(message, data)
         self.data = data
 
 class LogprobsNotSupportedError(OpenRouterError):
@@ -66,7 +66,7 @@ def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
     
     if isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
-        logger.error(f"HTTP error {status_code}: {exc.response.text}")
+        logger.error(f"HTTP error {status_code}: {exc.response.text} {exc.response.headers}")
         
         if status_code in RETRYABLE_STATUS_CODES:
             # Special case for 429: don't retry on free-models-per-day limit
@@ -108,7 +108,7 @@ def openrouter_request(payload, timeout=60.0, OPENROUTER_API_KEY=None):
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
         },
-        json=payload,
+        json=payload, # https://openrouter.ai/docs/api-reference/overview
         timeout=timeout,
     )
     # TODO go through this for ways to improve retry vs error raising https://old.reddit.com/r/JanitorAI_Official/comments/1m7r5ti/openrouter_error_guide_so_you_dont_have_to_scroll/
