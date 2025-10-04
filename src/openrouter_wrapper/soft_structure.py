@@ -40,7 +40,7 @@ def extract_answer_from_json(s, allowed_keys):
     exceptions = []
     try:
         return json_decode(s)
-    except json.JSONDecodeError as e1:
+    except (json.JSONDecodeError, ValueError) as e1:
         logger.debug(f"Failed to decode JSON, trying regex {e1}")
         exceptions.append(e1)
         try:

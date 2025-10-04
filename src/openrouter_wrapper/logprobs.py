@@ -1,22 +1,17 @@
 import re
 from . import OPENROUTER_API_KEY
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from loguru import logger
 from collections import OrderedDict
-import requests
 import numpy as np
-import polars as pl
-import stamina
 import httpx
-from anycache import anycache
 
 from .retry import openrouter_request, LogprobsNotSupportedError
 
 
-def get_top_logprobs_param(model_id, provider):
+def get_top_logprobs_param(model_id: str, provider: Optional[str]) -> int:
     """
     Different providers have different limits on the number of top logprobs they return.
-
 
         {'error': {'message': 'Provider returned error', 'code': 400, 'metadata': {'raw': '{"error":{"object":"error","type":"invalid_request_error","message":"logprobs must be between 0 and 5: 20"}}', 'provider_name': 'Fireworks'}}}
 
@@ -30,21 +25,31 @@ def get_top_logprobs_param(model_id, provider):
         return 5
     return 20
 
-def openrouter_completion_wlogprobs(messages, model_id, max_completion_tokens=2, provider_whitelist=None, provider_blocklist=None, stop= [], **kwargs):
-    json={
+
+async def openrouter_completion_wlogprobs(
+    messages: List[Dict[str, Any]],
+    model_id: str,
+    max_completion_tokens: int = 2,
+    provider_whitelist: Optional[List[str]] = None,
+    provider_blocklist: Optional[List[str]] = None,
+    stop: List[str] = [],
+    **kwargs
+) -> Dict[str, Any]:
+    provider = provider_whitelist[0] if provider_whitelist else None
+    json_payload = {
         "model": model_id,
         "messages": messages,
-
-
         # grok wants 8
-        "top_logprobs": get_top_logprobs_param(model_id, provider_whitelist[0] if provider_whitelist else None),
+        "logprobs": True,
+        "top_logprobs": get_top_logprobs_param(model_id, provider),
         "max_completion_tokens": max_completion_tokens,
         # "temperature": 0.0,
         "stop": stop,
-        "provider": {"require_parameters": True, 
-                        "only": provider_whitelist,
-                        'ignore': provider_blocklist
-                        },
+        "provider": {
+            "require_parameters": True, 
+            "only": provider_whitelist,
+            'ignore': provider_blocklist
+        },
         "usage": {"include": True},
         "reason": {"include": True, "effort": "low", 
                     "max_tokens": 60
@@ -56,20 +61,19 @@ def openrouter_completion_wlogprobs(messages, model_id, max_completion_tokens=2,
         #     "": -100,
         # },
         **kwargs,
-
     }
-    data = openrouter_request(json)
+    data = await openrouter_request(json_payload)
 
     if not data['choices'][0].get('logprobs'):
         raise LogprobsNotSupportedError(f"{model_id} has no logprobs capability", data=data)
     return data
-    
 
 
-
-
-def get_logprobs(response, regex: Optional[str] = '\d'):
-    """Get the logprobs from the response, get it from the first token that satifies the regex."""
+def get_logprobs(
+    response: Dict[str, Any], 
+    regex: Optional[str] = '\d'
+) -> Dict[str, float]:
+    """Get the logprobs from the response, get it from the first token that satisfies the regex."""
     try:
         content = response['choices'][0]['logprobs']['content']
     except KeyError:
@@ -97,13 +101,22 @@ def get_logprobs(response, regex: Optional[str] = '\d'):
             logp_dict[t] += lp["logprob"]
     return logp_dict
 
-def get_logprobs_choices(response, completion_tokens: list):
+
+def get_logprobs_choices(
+    response: Dict[str, Any], 
+    completion_tokens: List[str], 
+    regex: str = '\d'
+) -> tuple[OrderedDict[str, float], Dict[str, float]]:
     """Get the logprobs from the response and permute them to match the completion tokens."""
-    logp_dict = get_logprobs(response)
+    logp_dict = get_logprobs(response, regex=regex)
     choice_logp_dict = OrderedDict({t: logp_dict.get(t, -1000.) for t in completion_tokens})
     return choice_logp_dict, logp_dict
 
-def get_logprobs_numchoices(response, num_choices: int):
+
+def get_logprobs_numchoices(
+    response: Dict[str, Any],
+    num_choices: int
+) -> tuple[np.ndarray, Dict[str, float]]:
     """Get the logprobs from the response and permute them to match the number of choices."""
     logp_dict, logp_dict_all = get_logprobs_choices(response, completion_tokens=[str(i) for i in range(1, num_choices + 1)])
     completion_tokens = list(logp_dict.keys())[:num_choices]
@@ -117,8 +130,13 @@ def get_logprobs_numchoices(response, num_choices: int):
     return choice_logp_arr, logp_dict_all
 
 
-def eval_message_choice_logp(messages: List[Dict[str, str]], model_id: str, provider_whitelist: Optional[List[str]] = None, **kwargs) -> tuple:
-    response_data = openrouter_completion_wlogprobs(messages, model_id, provider_whitelist=provider_whitelist, **kwargs)
+async def eval_message_choice_logp(
+    messages: List[Dict[str, Any]],
+    model_id: str,
+    provider_whitelist: Optional[List[str]] = None,
+    **kwargs
+) -> tuple[np.ndarray, Dict[str, Any], Dict[str, float]]:
+    response_data = await openrouter_completion_wlogprobs(messages, model_id, provider_whitelist=provider_whitelist, **kwargs)
     num_actions = 5
     choice_logp_arr, logp_dict = get_logprobs_numchoices(response_data, num_actions)
     return choice_logp_arr, response_data, logp_dict

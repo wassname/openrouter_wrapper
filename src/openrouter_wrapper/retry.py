@@ -1,9 +1,10 @@
 import os
-from typing import Dict, Optional
-import httpx
+from typing import Dict, Optional, Any
+import asyncio
 import stamina
 from loguru import logger
-import requests
+from httpx import AsyncClient
+import httpx  # For exception classes
 
 stamina.instrumentation.set_on_retry_hooks([stamina.instrumentation.LoggingOnRetryHook])
 
@@ -29,10 +30,8 @@ class LowProbabilityError(OpenRouterError):
     """Model returned unexpectedly low probabilities"""
     pass
 
-
 class UpstreamError(OpenRouterError):
     """An error occurred in the upstream model response"""
-
 
 RETRYABLE_STATUS_CODES=[
     # 403 # is moderation
@@ -44,12 +43,11 @@ RETRYABLE_STATUS_CODES=[
     504
 ],  # the HTTP status codes to retry on
 
-
 class RetryException(Exception):
     """Exception raised for retryable errors."""
     pass
 
-def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
+async def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
     """
     Determine if an error is retryable based on type, status code, and message patterns.
     Logs all errors for debugging.
@@ -60,13 +58,13 @@ def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
         logger.warning(f"Retryable: Explicit RetryException - {exc}")
         return True
     
-    if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RequestError)):
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError)):
         logger.warning(f"Retryable: Network/timeout error - {exc}")
         return True
     
     if isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
-        logger.error(f"HTTP error {status_code}: {exc.response.text} {exc.response.headers}")
+        logger.error(f"HTTP error {status_code}: {response_text} {exc.response.headers}")
         
         if status_code in RETRYABLE_STATUS_CODES:
             # Special case for 429: don't retry on free-models-per-day limit
@@ -91,38 +89,38 @@ def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
         logger.error(f"Non-retryable: Status {status_code} - {exc}. response_text:{response_text}")
         return False
     
-    # Log unexpected errors but don't retry by default
     logger.error(f"Non-retryable: Unexpected error - {exc}")
     return False
 
-
 @stamina.retry(on=is_retryable_error, attempts=5, wait_max=20)
-def openrouter_request(payload, timeout=60.0, OPENROUTER_API_KEY=None):
-    """"Run a completion with logprobs on OpenRouter."""
+async def openrouter_request(payload: Dict[str, Any], timeout: float = 60.0, OPENROUTER_API_KEY: Optional[str] = None) -> Dict[str, Any]:
+    """Run a completion on OpenRouter asynchronously."""
     if OPENROUTER_API_KEY is None:
         OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    model_id = payload.get("model_id")
-    response = httpx.post(
-        url="https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=payload, # https://openrouter.ai/docs/api-reference/overview
-        timeout=timeout,
-    )
-    # TODO go through this for ways to improve retry vs error raising https://old.reddit.com/r/JanitorAI_Official/comments/1m7r5ti/openrouter_error_guide_so_you_dont_have_to_scroll/
-    # https://openrouter.ai/docs/api-reference/errors#error-codes
-    # 403 is moderation
-    # 429 is request rate limit exceeded
+    if not OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY must be set in environment or provided")
+    
+    model_id = payload.get("model")
+    async with AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+    
     try:
         response.raise_for_status()
-    except (requests.exceptions.HTTPError, httpx.HTTPStatusError) as e:
-        # requests.exceptions.HTTPError: 408 Client Error: Request Timeout for url: https://openrouter.ai/api/v1/chat/completions
-        logger.error(f"HTTP error for model {model_id}: {response.text}")
-        if not is_retryable_error(e, response.text):
-            raise  # Non-retryable, stop here
-        raise RetryException(f"Retryable HTTP error: {e}")  # Trigger retry
+    except httpx.HTTPStatusError as e:
+        response_text = await e.response.aread()
+        response_text_str = response_text.decode('utf-8')
+        logger.error(f"HTTP error for model {model_id}: {response_text_str}")
+        if not await is_retryable_error(e, response_text_str):
+            raise
+        raise RetryException(f"Retryable HTTP error: {e}")
+    
     try:
         data = response.json()
         
@@ -147,16 +145,21 @@ def openrouter_request(payload, timeout=60.0, OPENROUTER_API_KEY=None):
                 raise RetryException("Upstream server error, retrying")
             raise UpstreamError(error, data=data)
 
-    except requests.exceptions.JSONDecodeError as e:
+    except httpx.InvalidJSON as e:  # Updated to httpx's JSON error
+        response_text = await response.aread()
+        response_text_str = response_text.decode('utf-8')
         logger.error(f"Failed to decode JSON response for model {model_id}: {e}")
-        logger.debug(f"Response text: {response.text}")
-        raise MalformedResponseError(f"Malformed response for model {model_id}", data=response.text)
+        logger.debug(f"Response text: {response_text_str}")
+        raise MalformedResponseError(f"Malformed response for model {model_id}", data=response_text_str)
     except OpenRouterError:
         raise
     except Exception as e:
         logger.error(f"Unexpected error for model {model_id}: {e}")
-        logger.debug(response.text)
-        # logger.debug(response.headers)
+        try:
+            response_text = await response.aread()
+            logger.debug(response_text.decode('utf-8'))
+        except:
+            pass
         raise e
     
     return data
