@@ -73,6 +73,14 @@ def test_retryable_upstream_sse_json_error() -> None:
     assert is_retryable_error(exc)
 
 
+def test_retryable_upstream_idle_timeout() -> None:
+    exc = UpstreamError(
+        "Upstream idle timeout exceeded",
+        data={"choices": [{"finish_reason": "error", "error": {"code": 504}}]},
+    )
+    assert is_retryable_error(exc)
+
+
 def test_retryable_malformed_response_pattern() -> None:
     exc = MalformedResponseError(
         "Malformed response",

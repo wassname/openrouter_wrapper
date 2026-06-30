@@ -49,6 +49,7 @@ RETRYABLE_ERROR_PATTERNS = [
     "provider returned error",
     "please try again",
     "json error injected into sse stream",
+    "upstream idle timeout exceeded",
 ]
 
 class RetryException(Exception):
