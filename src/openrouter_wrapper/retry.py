@@ -1,6 +1,5 @@
 import os
 from typing import Dict, Optional, Any
-import asyncio
 import stamina
 from loguru import logger
 from httpx import AsyncClient
@@ -33,7 +32,7 @@ class LowProbabilityError(OpenRouterError):
 class UpstreamError(OpenRouterError):
     """An error occurred in the upstream model response"""
 
-RETRYABLE_STATUS_CODES=[
+RETRYABLE_STATUS_CODES = {
     # 403 # is moderation
     408,  # request timeout
     429, # request rate limit exceeded
@@ -41,13 +40,25 @@ RETRYABLE_STATUS_CODES=[
     502, # 
     503,
     504
-],  # the HTTP status codes to retry on
+}  # the HTTP status codes to retry on
+
+RETRYABLE_ERROR_PATTERNS = [
+    "rate-limited upstream",
+    "temporarily rate-limited upstream",
+    "provider returned error",
+    "please try again",
+]
 
 class RetryException(Exception):
     """Exception raised for retryable errors."""
     pass
 
-async def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
+def _has_retryable_error_pattern(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern in lowered for pattern in RETRYABLE_ERROR_PATTERNS)
+
+
+def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
     """
     Determine if an error is retryable based on type, status code, and message patterns.
     Logs all errors for debugging.
@@ -57,6 +68,14 @@ async def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
     if isinstance(exc, RetryException):
         logger.warning(f"Retryable: Explicit RetryException - {exc}")
         return True
+
+    if isinstance(exc, ProviderError):
+        error_text = response_text or str(exc.data or exc)
+        if _has_retryable_error_pattern(error_text):
+            logger.warning(f"Retryable: ProviderError pattern - {error_text}")
+            return True
+        logger.error(f"Non-retryable: ProviderError - {error_text}")
+        return False
     
     if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError)):
         logger.warning(f"Retryable: Network/timeout error - {exc}")
@@ -74,17 +93,9 @@ async def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
             logger.warning(f"Retryable: Status {status_code} - {exc}")
             return True    
         
-        # Check for specific retryable patterns in response (e.g., upstream rate limits)
-        retry_patterns = [
-            "rate-limited upstream",
-            "temporarily rate-limited upstream",
-            "provider returned error",
-            "please try again"
-        ]
-        for pattern in retry_patterns:
-            if pattern in response_text.lower():
-                logger.warning(f"Retryable: Pattern '{pattern}' in response - {response_text}")
-                return True
+        if _has_retryable_error_pattern(response_text):
+            logger.warning(f"Retryable: retryable pattern in response - {response_text}")
+            return True
         
         logger.error(f"Non-retryable: Status {status_code} - {exc}. response_text:{response_text}")
         return False
@@ -117,7 +128,7 @@ async def openrouter_request(payload: Dict[str, Any], timeout: float = 60.0, OPE
         response_text = await e.response.aread()
         response_text_str = response_text.decode('utf-8')
         logger.error(f"HTTP error for model {model_id}: {response_text_str}")
-        if not await is_retryable_error(e, response_text_str):
+        if not is_retryable_error(e, response_text_str):
             raise
         raise RetryException(f"Retryable HTTP error: {e}")
     
