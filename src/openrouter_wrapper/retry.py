@@ -1,4 +1,5 @@
 import os
+import json
 from typing import Dict, Optional, Any
 import stamina
 from loguru import logger
@@ -47,6 +48,7 @@ RETRYABLE_ERROR_PATTERNS = [
     "temporarily rate-limited upstream",
     "provider returned error",
     "please try again",
+    "json error injected into sse stream",
 ]
 
 class RetryException(Exception):
@@ -56,6 +58,10 @@ class RetryException(Exception):
 def _has_retryable_error_pattern(text: str) -> bool:
     lowered = text.lower()
     return any(pattern in lowered for pattern in RETRYABLE_ERROR_PATTERNS)
+
+
+def _error_text(exc: Exception, response_text: str = "") -> str:
+    return response_text or f"{exc} {getattr(exc, 'data', '')}"
 
 
 def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
@@ -74,11 +80,27 @@ def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
         return True
 
     if isinstance(exc, ProviderError):
-        error_text = response_text or str(exc.data or exc)
+        error_text = _error_text(exc, response_text)
         if _has_retryable_error_pattern(error_text):
             logger.warning(f"Retryable: ProviderError pattern - {error_text}")
             return True
         logger.error(f"Non-retryable: ProviderError - {error_text}")
+        return False
+
+    if isinstance(exc, UpstreamError):
+        error_text = _error_text(exc, response_text)
+        if _has_retryable_error_pattern(error_text):
+            logger.warning(f"Retryable: UpstreamError pattern - {error_text}")
+            return True
+        logger.error(f"Non-retryable: UpstreamError - {error_text}")
+        return False
+
+    if isinstance(exc, MalformedResponseError):
+        error_text = _error_text(exc, response_text)
+        if _has_retryable_error_pattern(error_text):
+            logger.warning(f"Retryable: MalformedResponseError pattern - {error_text}")
+            return True
+        logger.error(f"Non-retryable: MalformedResponseError - {error_text}")
         return False
     
     if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError)):
@@ -160,7 +182,7 @@ async def openrouter_request(payload: Dict[str, Any], timeout: float = 60.0, OPE
                 raise RetryException("Upstream server error, retrying")
             raise UpstreamError(error, data=data)
 
-    except httpx.InvalidJSON as e:  # Updated to httpx's JSON error
+    except json.JSONDecodeError as e:
         response_text = await response.aread()
         response_text_str = response_text.decode('utf-8')
         logger.error(f"Failed to decode JSON response for model {model_id}: {e}")

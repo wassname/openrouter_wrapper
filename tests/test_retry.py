@@ -1,7 +1,13 @@
 import httpx
 import pytest
 
-from openrouter_wrapper.retry import ProviderError, RetryException, is_retryable_error
+from openrouter_wrapper.retry import (
+    MalformedResponseError,
+    ProviderError,
+    RetryException,
+    UpstreamError,
+    is_retryable_error,
+)
 
 
 def _http_error(status_code: int, text: str = "") -> httpx.HTTPStatusError:
@@ -57,3 +63,19 @@ def test_provider_whitelist_is_hard_restriction_not_deepinfra_preference():
         "allow_fallbacks": True,
         "only": ["fireworks"],
     }
+
+
+def test_retryable_upstream_sse_json_error() -> None:
+    exc = UpstreamError(
+        "JSON error injected into SSE stream",
+        data={"choices": [{"finish_reason": "error"}]},
+    )
+    assert is_retryable_error(exc)
+
+
+def test_retryable_malformed_response_pattern() -> None:
+    exc = MalformedResponseError(
+        "Malformed response",
+        data="JSON error injected into SSE stream",
+    )
+    assert is_retryable_error(exc)
