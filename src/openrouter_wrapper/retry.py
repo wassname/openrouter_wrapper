@@ -32,15 +32,15 @@ class LowProbabilityError(OpenRouterError):
 class UpstreamError(OpenRouterError):
     """An error occurred in the upstream model response"""
 
-RETRYABLE_STATUS_CODES = {
+RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({
     # 403 # is moderation
     408,  # request timeout
     429, # request rate limit exceeded
     500,
     502, # 
     503,
-    504
-}  # the HTTP status codes to retry on
+    504,
+})
 
 RETRYABLE_ERROR_PATTERNS = [
     "rate-limited upstream",
@@ -64,6 +64,10 @@ def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
     Logs all errors for debugging.
     """
     logger.info(f"Evaluating error for retry: {exc}")
+
+    if isinstance(exc, KeyboardInterrupt):
+        logger.info("Not retrying: KeyboardInterrupt")
+        return False
     
     if isinstance(exc, RetryException):
         logger.warning(f"Retryable: Explicit RetryException - {exc}")

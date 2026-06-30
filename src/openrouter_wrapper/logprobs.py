@@ -26,16 +26,32 @@ def get_top_logprobs_param(model_id: str, provider: Optional[str]) -> int:
     return 20
 
 
+def build_provider_preferences(
+    provider_whitelist: Optional[List[str]] = None,
+    provider_blocklist: Optional[List[str]] = None,
+    preferred_provider: Optional[str] = "deepinfra",
+) -> Dict[str, Any]:
+    provider = {"require_parameters": True, "allow_fallbacks": True}
+    if provider_whitelist is not None:
+        provider["only"] = provider_whitelist
+    elif preferred_provider is not None:
+        provider["order"] = [preferred_provider]
+    if provider_blocklist is not None:
+        provider["ignore"] = provider_blocklist
+    return provider
+
+
 async def openrouter_completion_wlogprobs(
     messages: List[Dict[str, Any]],
     model_id: str,
     max_completion_tokens: int = 2,
     provider_whitelist: Optional[List[str]] = None,
     provider_blocklist: Optional[List[str]] = None,
+    preferred_provider: Optional[str] = "deepinfra",
     stop: List[str] = [],
     **kwargs
 ) -> Dict[str, Any]:
-    provider = provider_whitelist[0] if provider_whitelist else None
+    provider = provider_whitelist[0] if provider_whitelist else preferred_provider
     json_payload = {
         "model": model_id,
         "messages": messages,
@@ -45,11 +61,11 @@ async def openrouter_completion_wlogprobs(
         "max_completion_tokens": max_completion_tokens,
         # "temperature": 0.0,
         "stop": stop,
-        "provider": {
-            "require_parameters": True, 
-            "only": provider_whitelist,
-            'ignore': provider_blocklist
-        },
+        "provider": build_provider_preferences(
+            provider_whitelist=provider_whitelist,
+            provider_blocklist=provider_blocklist,
+            preferred_provider=preferred_provider,
+        ),
         "usage": {"include": True},
         "reason": {"include": True, "effort": "low", 
                     "max_tokens": 60
