@@ -52,6 +52,12 @@ RETRYABLE_ERROR_PATTERNS = [
     "upstream idle timeout exceeded",
 ]
 
+# OpenRouter is a middleman; its providers sometimes return a transient failure wrapped in an
+# HTTP 400 whose JSON error.code holds the real upstream status. OpenRouter can't normalise this
+# (undocumented), so we retry those inner codes client-side. Ordinary 400s (inner code 400) stay
+# fatal. -- Claude
+TRANSIENT_INNER_ERROR_CODES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504, 524, 529})
+
 class RetryException(Exception):
     """Exception raised for retryable errors."""
     pass
@@ -63,6 +69,19 @@ def _has_retryable_error_pattern(text: str) -> bool:
 
 def _error_text(exc: Exception, response_text: str = "") -> str:
     return response_text or f"{exc} {getattr(exc, 'data', '')}"
+
+
+def _transient_inner_error_code(response_text: str) -> Optional[int]:
+    """Real upstream status OpenRouter wrapped inside a 400 body's error.code, or None."""
+    try:
+        body = json.loads(response_text)
+    except json.JSONDecodeError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    if isinstance(code, str) and code.isdigit():
+        code = int(code)
+    return code if isinstance(code, int) else None
 
 
 def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
@@ -118,8 +137,12 @@ def is_retryable_error(exc: Exception, response_text: str = "") -> bool:
                 logger.error(f"Non-retryable: Free models daily limit exceeded - {response_text}")
                 return False
             logger.warning(f"Retryable: Status {status_code} - {exc}")
-            return True    
-        
+            return True
+
+        if status_code == 400 and _transient_inner_error_code(response_text) in TRANSIENT_INNER_ERROR_CODES:
+            logger.warning(f"Retryable: HTTP 400 wrapping transient upstream code - {response_text}")
+            return True
+
         if _has_retryable_error_pattern(response_text):
             logger.warning(f"Retryable: retryable pattern in response - {response_text}")
             return True
@@ -201,3 +224,11 @@ async def openrouter_request(payload: Dict[str, Any], timeout: float = 60.0, OPE
         raise e
     
     return data
+
+
+# TODO add sync version
+def openrouter_request_sync(payload: Dict[str, Any], timeout: float = 60.0, OPENROUTER_API_KEY: Optional[str] = None) -> Dict[str, Any]:
+    """Run a completion on OpenRouter synchronously."""
+    return asyncio.run(openrouter_request(payload, timeout=timeout, OPENROUTER_API_KEY=OPENROUTER_API_KEY))
+
+# TODO should also make an openai type python function with types args
